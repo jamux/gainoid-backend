@@ -313,7 +313,7 @@ def portfolio():
                 total += amount
                 assets.append({'symbol': 'GBP', 'name': 'Sterling (Cash)', 'icon': 'GBP',
                                 'amount': round(amount, 2), 'price_gbp': 1.0,
-                                'value_gbp': round(amount, 2), 'change_24h': 0.0, 'held': True})
+                                'value_gbp': round(amount, 2), 'change_24h': 0.0})
                 continue
             if info:
                 pair   = info['pair']
@@ -324,7 +324,7 @@ def portfolio():
                 total += value
                 assets.append({'symbol': info['sym'], 'name': info['name'], 'icon': info['sym'],
                                 'amount': round(amount, 8), 'price_gbp': round(price, 6),
-                                'value_gbp': value, 'change_24h': change, 'held': True})
+                                'value_gbp': value, 'change_24h': change})
             else:
                 assets.append({'symbol': coin, 'name': coin, 'icon': coin,
                                 'amount': round(amount, 8), 'price_gbp': 0,
