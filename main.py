@@ -44,11 +44,12 @@ MODE = {
 COINS = {
     'XXRP':  {'sym': 'XRP',  'name': 'Ripple',   'pair': 'XRPGBP'},
     'XXBT':  {'sym': 'BTC',  'name': 'Bitcoin',  'pair': 'XXBTZGBP'},
-    'XDOGE': {'sym': 'DOGE', 'name': 'Dogecoin', 'pair': 'DOGEGBP'},
-    'MATIC': {'sym': 'MATIC','name': 'Polygon',  'pair': 'MATICGBP'},
-    'NXS':   {'sym': 'NXS',  'name': 'Nexus',    'pair': 'NXSGBP'},
+    'XDOGE': {'sym': 'DOGE', 'name': 'Dogecoin', 'pair': 'XDGGBP'},
     'XETH':  {'sym': 'ETH',  'name': 'Ethereum', 'pair': 'XETHZGBP'},
-    'XLTC':  {'sym': 'LTC',  'name': 'Litecoin', 'pair': 'XLTCZGBP'},
+    'XLTC':  {'sym': 'LTC',  'name': 'Litecoin', 'pair': 'LTCGBP'},
+    'XXLM':  {'sym': 'XLM',  'name': 'Stellar',  'pair': 'XXLMZGBP'},
+    'SOL':   {'sym': 'SOL',  'name': 'Solana',   'pair': 'SOLGBP'},
+    'ADA':   {'sym': 'ADA',  'name': 'Cardano',  'pair': 'ADAGBP'},
 }
 
 
@@ -294,16 +295,7 @@ def portfolio():
             return jsonify({'error': str(bal['error'])}), 400
 
         balances = {c: float(a) for c, a in bal['result'].items() if float(a) > 0.0001}
-        COIN_MAP = {
-            'XXRP':  {'sym': 'XRP',  'name': 'Ripple',   'pair': 'XRPGBP'},
-            'XXBT':  {'sym': 'BTC',  'name': 'Bitcoin',  'pair': 'XXBTZGBP'},
-            'XDOGE': {'sym': 'DOGE', 'name': 'Dogecoin', 'pair': 'DOGEGBP'},
-            'MATIC': {'sym': 'MATIC','name': 'Polygon',  'pair': 'MATICGBP'},
-            'NXS':   {'sym': 'NXS',  'name': 'Nexus',    'pair': 'NXSGBP'},
-            'XETH':  {'sym': 'ETH',  'name': 'Ethereum', 'pair': 'XETHZGBP'},
-            'XLTC':  {'sym': 'LTC',  'name': 'Litecoin', 'pair': 'XLTCZGBP'},
-            'ZGBP':  {'sym': 'GBP',  'name': 'Sterling', 'pair': None},
-        }
+        COIN_MAP = {**COINS, 'ZGBP': {'sym': 'GBP', 'name': 'Sterling', 'pair': None}}
         pairs  = [v['pair'] for v in COIN_MAP.values() if v['pair']]
         ticker = k.query_public('Ticker', {'pair': ','.join(pairs)})
         prices = {}
