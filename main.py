@@ -325,10 +325,7 @@ def portfolio():
                 assets.append({'symbol': info['sym'], 'name': info['name'], 'icon': info['sym'],
                                 'amount': round(amount, 8), 'price_gbp': round(price, 6),
                                 'value_gbp': value, 'change_24h': change})
-            else:
-                assets.append({'symbol': coin, 'name': coin, 'icon': coin,
-                                'amount': round(amount, 8), 'price_gbp': 0,
-                                'value_gbp': 0, 'change_24h': 0, 'held': False})
+            # skip unknown coins we can't price
 
         assets.sort(key=lambda x: x['value_gbp'], reverse=True)
         return jsonify({'assets': assets, 'total_gbp': round(total, 2),
