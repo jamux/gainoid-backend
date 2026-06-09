@@ -29,6 +29,44 @@ def health():
     return jsonify({'status': 'ok', 'bot': 'ShaniceAI ONLINE'})
 
 
+@app.route('/verify-keys', methods=['POST'])
+def verify_keys():
+    data = request.json or {}
+    api_key = data.get('api_key', '').strip()
+    api_secret = data.get('api_secret', '').strip()
+
+    if not api_key or not api_secret:
+        return jsonify({'ok': False, 'error': 'Both API key and secret are required'}), 400
+
+    # Step 1: check Kraken public API is reachable
+    try:
+        k = get_kraken(api_key, api_secret)
+        time_resp = k.query_public('Time')
+        if time_resp.get('error') and time_resp['error']:
+            return jsonify({'ok': False, 'error': f"Kraken unreachable: {time_resp['error']}"}), 502
+    except Exception as e:
+        return jsonify({'ok': False, 'error': f"Cannot reach Kraken: {str(e)}"}), 502
+
+    # Step 2: verify the private keys by fetching balance
+    try:
+        bal = k.query_private('Balance')
+        if bal.get('error') and bal['error']:
+            return jsonify({'ok': False, 'error': f"Invalid API keys: {bal['error']}"}), 401
+
+        balances = {c: float(a) for c, a in bal['result'].items() if float(a) > 0.0001}
+        gbp = balances.get('ZGBP', 0.0)
+        asset_count = len([c for c in balances if c != 'ZGBP'])
+
+        return jsonify({
+            'ok': True,
+            'message': 'Kraken connected. Keys valid.',
+            'gbp_balance': round(gbp, 2),
+            'asset_count': asset_count,
+        })
+    except Exception as e:
+        return jsonify({'ok': False, 'error': f"Key verification failed: {str(e)}"}), 500
+
+
 @app.route('/portfolio', methods=['POST'])
 def portfolio():
     data = request.json or {}
