@@ -33,6 +33,7 @@ BOT = {
     'total_fees':   0.0,
     'last_cycle':   None,
     'entry_prices': {},
+    'dca_state':    {},   # {sym: {'tranche': N, 'avg_entry': float, 'total_qty': float}}
 }
 
 MODE = {
@@ -40,6 +41,15 @@ MODE = {
     'balanced':     {'strategy': 'momentum', 'buy':  1.5,  'sell': -2.0, 'alloc': 0.20},
     'conservative': {'strategy': 'momentum', 'buy':  3.0,  'sell': -4.0, 'alloc': 0.10},
     'dip':          {'strategy': 'dip',      'buy': -1.0,  'sell':  1.5, 'alloc': 0.25},
+    'dca':          {
+        'strategy': 'dca',
+        'tranches': [
+            {'threshold': -0.8, 'alloc': 0.10},   # T1: drop 0.8%, spend 10% of GBP
+            {'threshold': -1.8, 'alloc': 0.12},   # T2: drop 1.8%, spend 12% of GBP
+            {'threshold': -3.0, 'alloc': 0.15},   # T3: drop 3.0%, spend 15% of GBP
+        ],
+        'sell': 1.2,  # sell all when 24h change recovers to +1.2%
+    },
 }
 
 COINS = {
@@ -136,6 +146,7 @@ def _run_cycle():
         api_secret   = BOT['api_secret']
         cfg          = {**BOT['config']}
         entry_prices = {**BOT['entry_prices']}
+        dca_state    = {s: {**v} for s, v in BOT['dca_state'].items()}
 
     _log('CYCLE', 'Starting')
     k          = get_kraken(api_key, api_secret)
@@ -194,34 +205,85 @@ def _run_cycle():
                 if _do_sell(k, pair, sym, held_qty, price, reason='STOP_LOSS'):
                     with _lock:
                         BOT['entry_prices'].pop(sym, None)
+                        BOT['dca_state'].pop(sym, None)
                 continue
 
         strategy = thresholds.get('strategy', 'momentum')
 
-        if strategy == 'dip':
-            # Buy when price dips, sell when it recovers
-            buy_signal  = change <= thresholds['buy']   and held_qty == 0  and gbp >= cfg['min_order']
-            sell_signal = change >= thresholds['sell']  and held_qty > 0   and held_val >= cfg['min_order']
+        if strategy == 'dca':
+            dca = dca_state.get(sym, {'tranche': 0, 'avg_entry': 0.0, 'total_qty': 0.0})
+
+            # Sell all when price recovers to sell threshold
+            if dca['tranche'] > 0 and held_qty > 0 and held_val >= cfg['min_order']:
+                if change >= thresholds['sell']:
+                    _log('SIGNAL', f"{sym} change={change:+.2f}% — SELL DCA (T{dca['tranche']}→all)")
+                    if _do_sell(k, pair, sym, held_qty, price, reason='DCA'):
+                        with _lock:
+                            BOT['dca_state'].pop(sym, None)
+                            BOT['entry_prices'].pop(sym, None)
+                        dca_state.pop(sym, None)
+            else:
+                # Try to buy the next un-bought tranche
+                for i, t in enumerate(thresholds['tranches']):
+                    tranche_num = i + 1
+                    if dca['tranche'] >= tranche_num:
+                        continue  # already bought this tranche
+                    if change <= t['threshold']:
+                        spend = gbp * t['alloc']
+                        if spend >= cfg['min_order']:
+                            qty = spend / price
+                            _log('SIGNAL', f"{sym} change={change:+.2f}% — BUY T{tranche_num}/3 (dca)")
+                            if _do_buy(k, pair, sym, qty, price, spend):
+                                old_qty   = dca['total_qty']
+                                old_entry = dca['avg_entry']
+                                new_qty   = old_qty + qty
+                                new_avg   = ((old_qty * old_entry) + (qty * price)) / new_qty
+                                dca       = {'tranche': tranche_num, 'avg_entry': new_avg, 'total_qty': new_qty}
+                                dca_state[sym] = dca
+                                with _lock:
+                                    BOT['dca_state'][sym]    = {**dca}
+                                    BOT['entry_prices'][sym] = new_avg
+                                gbp -= spend
+                        break  # one tranche per coin per cycle
+
+        elif strategy == 'dip':
+            buy_signal  = change <= thresholds['buy']  and held_qty == 0 and gbp >= cfg['min_order']
+            sell_signal = change >= thresholds['sell'] and held_qty > 0  and held_val >= cfg['min_order']
+
+            if buy_signal:
+                spend = min(gbp * thresholds['alloc'], gbp - 1.0)
+                if spend >= cfg['min_order']:
+                    qty = spend / price
+                    _log('SIGNAL', f"{sym} change={change:+.2f}% — BUY (dip)")
+                    if _do_buy(k, pair, sym, qty, price, spend):
+                        with _lock:
+                            BOT['entry_prices'][sym] = price
+                        gbp -= spend
+            elif sell_signal:
+                _log('SIGNAL', f"{sym} change={change:+.2f}% — SELL (dip)")
+                if _do_sell(k, pair, sym, held_qty, price, reason='DIP'):
+                    with _lock:
+                        BOT['entry_prices'].pop(sym, None)
+
         else:
             # Momentum: buy on upward move, sell on downward move
-            buy_signal  = change >= thresholds['buy']   and gbp >= cfg['min_order']
-            sell_signal = change <= thresholds['sell']  and held_qty > 0   and held_val >= cfg['min_order']
+            buy_signal  = change >= thresholds['buy']  and gbp >= cfg['min_order']
+            sell_signal = change <= thresholds['sell'] and held_qty > 0 and held_val >= cfg['min_order']
 
-        if buy_signal:
-            spend = min(gbp * thresholds['alloc'], gbp - 1.0)
-            if spend >= cfg['min_order']:
-                qty = spend / price
-                _log('SIGNAL', f"{sym} change={change:+.2f}% — BUY ({strategy})")
-                if _do_buy(k, pair, sym, qty, price, spend):
+            if buy_signal:
+                spend = min(gbp * thresholds['alloc'], gbp - 1.0)
+                if spend >= cfg['min_order']:
+                    qty = spend / price
+                    _log('SIGNAL', f"{sym} change={change:+.2f}% — BUY (momentum)")
+                    if _do_buy(k, pair, sym, qty, price, spend):
+                        with _lock:
+                            BOT['entry_prices'][sym] = price
+                        gbp -= spend
+            elif sell_signal:
+                _log('SIGNAL', f"{sym} change={change:+.2f}% — SELL (momentum)")
+                if _do_sell(k, pair, sym, held_qty, price, reason='MOMENTUM'):
                     with _lock:
-                        BOT['entry_prices'][sym] = price
-                    gbp -= spend
-
-        elif sell_signal:
-            _log('SIGNAL', f"{sym} change={change:+.2f}% — SELL ({strategy})")
-            if _do_sell(k, pair, sym, held_qty, price, reason=strategy.upper()):
-                with _lock:
-                    BOT['entry_prices'].pop(sym, None)
+                        BOT['entry_prices'].pop(sym, None)
 
     with _lock:
         BOT['last_cycle'] = datetime.utcnow().isoformat()
