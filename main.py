@@ -36,9 +36,10 @@ BOT = {
 }
 
 MODE = {
-    'aggro':        {'buy': 0.5,  'sell': -1.0, 'alloc': 0.30},
-    'balanced':     {'buy': 1.5,  'sell': -2.0, 'alloc': 0.20},
-    'conservative': {'buy': 3.0,  'sell': -4.0, 'alloc': 0.10},
+    'aggro':        {'strategy': 'momentum', 'buy':  0.5,  'sell': -1.0, 'alloc': 0.30},
+    'balanced':     {'strategy': 'momentum', 'buy':  1.5,  'sell': -2.0, 'alloc': 0.20},
+    'conservative': {'strategy': 'momentum', 'buy':  3.0,  'sell': -4.0, 'alloc': 0.10},
+    'dip':          {'strategy': 'dip',      'buy': -1.0,  'sell':  1.5, 'alloc': 0.25},
 }
 
 COINS = {
@@ -183,9 +184,9 @@ def _run_cycle():
         held_val = held_qty * price
         entry    = entry_prices.get(sym, 0)
 
-        _log('SCAN', f"{sym} change={change:+.2f}%  held={held_qty:.4f} (£{held_val:.2f})  buy>={thresholds['buy']}%  sell<={thresholds['sell']}%")
+        _log('SCAN', f"{sym} change={change:+.2f}%  held=£{held_val:.2f}  gbp=£{gbp:.2f}")
 
-        # Stop loss check
+        # Stop loss (all strategies)
         if entry > 0 and held_qty > 0 and held_val >= cfg['min_order']:
             drop = ((price - entry) / entry) * 100
             if drop <= -cfg['stop_loss']:
@@ -195,21 +196,30 @@ def _run_cycle():
                         BOT['entry_prices'].pop(sym, None)
                 continue
 
-        # Buy signal
-        if change >= thresholds['buy'] and gbp >= cfg['min_order']:
+        strategy = thresholds.get('strategy', 'momentum')
+
+        if strategy == 'dip':
+            # Buy when price dips, sell when it recovers
+            buy_signal  = change <= thresholds['buy']   and held_qty == 0  and gbp >= cfg['min_order']
+            sell_signal = change >= thresholds['sell']  and held_qty > 0   and held_val >= cfg['min_order']
+        else:
+            # Momentum: buy on upward move, sell on downward move
+            buy_signal  = change >= thresholds['buy']   and gbp >= cfg['min_order']
+            sell_signal = change <= thresholds['sell']  and held_qty > 0   and held_val >= cfg['min_order']
+
+        if buy_signal:
             spend = min(gbp * thresholds['alloc'], gbp - 1.0)
             if spend >= cfg['min_order']:
                 qty = spend / price
-                _log('SIGNAL', f"{sym} change={change:.2f}% — BUY")
+                _log('SIGNAL', f"{sym} change={change:+.2f}% — BUY ({strategy})")
                 if _do_buy(k, pair, sym, qty, price, spend):
                     with _lock:
                         BOT['entry_prices'][sym] = price
                     gbp -= spend
 
-        # Sell signal
-        elif change <= thresholds['sell'] and held_qty > 0 and held_val >= cfg['min_order']:
-            _log('SIGNAL', f"{sym} change={change:.2f}% — SELL")
-            if _do_sell(k, pair, sym, held_qty, price, reason='MOMENTUM'):
+        elif sell_signal:
+            _log('SIGNAL', f"{sym} change={change:+.2f}% — SELL ({strategy})")
+            if _do_sell(k, pair, sym, held_qty, price, reason=strategy.upper()):
                 with _lock:
                     BOT['entry_prices'].pop(sym, None)
 
