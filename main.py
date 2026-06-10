@@ -183,6 +183,8 @@ def _run_cycle():
         held_val = held_qty * price
         entry    = entry_prices.get(sym, 0)
 
+        _log('SCAN', f"{sym} change={change:+.2f}%  held={held_qty:.4f} (£{held_val:.2f})  buy>={thresholds['buy']}%  sell<={thresholds['sell']}%")
+
         # Stop loss check
         if entry > 0 and held_qty > 0 and held_val >= cfg['min_order']:
             drop = ((price - entry) / entry) * 100
