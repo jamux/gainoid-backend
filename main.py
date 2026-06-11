@@ -19,18 +19,20 @@ BOT = {
     'api_key':      '',
     'api_secret':   '',
     'config': {
-        'mode':        'balanced',
-        'interval':    15,
-        'harvest_pct': 50,
-        'min_order':   5.0,
-        'stop_loss':   15,
-        'held_coins':  [],
+        'mode':             'balanced',
+        'interval':         15,
+        'harvest_pct':      50,
+        'harvest_enabled':  False,
+        'min_order':        5.0,
+        'stop_loss':        15,
+        'held_coins':       [],
     },
     'trades':       [],
     'log':          [],
     'harvested':    0.0,
     'today_profit': 0.0,
     'total_fees':   0.0,
+    'ringfenced':   0.0,
     'last_cycle':   None,
     'entry_prices': {},
     'dca_state':    {},   # {sym: {'tranche': N, 'avg_entry': float, 'total_qty': float}}
@@ -134,6 +136,10 @@ def _do_sell(k, pair, sym, qty, price, reason='MOMENTUM'):
         profit = max(0.0, (price - entry) * qty)
         BOT['harvested']    += profit
         BOT['today_profit'] += profit
+        if profit > 0 and BOT['config'].get('harvest_enabled'):
+            ring = profit * (BOT['config']['harvest_pct'] / 100)
+            BOT['ringfenced'] += ring
+            _log('HARVEST', f"£{ring:.4f} ringfenced ({BOT['config']['harvest_pct']}% of £{profit:.4f} profit)  total=£{BOT['ringfenced']:.2f}")
     _record_trade(txid, 'sell', sym, proceeds, price, fee, reason=reason)
     _log('SELL', f"{sym} {qty:.6f} @ £{price:.4f}  reason={reason}")
     return True
@@ -147,6 +153,7 @@ def _run_cycle():
         cfg          = {**BOT['config']}
         entry_prices = {**BOT['entry_prices']}
         dca_state    = {s: {**v} for s, v in BOT['dca_state'].items()}
+        ringfenced   = BOT['ringfenced'] if cfg.get('harvest_enabled') else 0.0
 
     _log('CYCLE', 'Starting')
     k          = get_kraken(api_key, api_secret)
@@ -163,8 +170,12 @@ def _run_cycle():
         _log('ERR', f"Balance fetch: {e}")
         return
 
-    gbp = balances.get('ZGBP', 0.0)
-    _log('CYCLE', f"GBP available: £{gbp:.2f}")
+    total_gbp = balances.get('ZGBP', 0.0)
+    gbp       = max(0.0, total_gbp - ringfenced)
+    if ringfenced > 0:
+        _log('CYCLE', f"GBP: £{total_gbp:.2f} total  £{ringfenced:.2f} ringfenced  £{gbp:.2f} tradeable")
+    else:
+        _log('CYCLE', f"GBP available: £{gbp:.2f}")
 
     try:
         pairs_str = ','.join(v['pair'] for v in COINS.values())
@@ -457,7 +468,7 @@ def bot_start():
         BOT['api_secret'] = api_secret
         BOT['active']     = True
         cfg = data.get('config', {})
-        for field in ('mode', 'interval', 'harvest_pct', 'min_order', 'stop_loss', 'held_coins'):
+        for field in ('mode', 'interval', 'harvest_pct', 'harvest_enabled', 'min_order', 'stop_loss', 'held_coins'):
             if field in cfg:
                 BOT['config'][field] = cfg[field]
 
@@ -489,8 +500,18 @@ def bot_status():
             'harvested':    round(BOT['harvested'], 2),
             'today_profit': round(BOT['today_profit'], 2),
             'total_fees':   round(BOT['total_fees'], 4),
+            'ringfenced':   round(BOT['ringfenced'], 2),
             'log':          BOT['log'][:20],
         })
+
+
+@app.route('/bot/harvest/reset', methods=['POST'])
+def harvest_reset():
+    with _lock:
+        amount = round(BOT['ringfenced'], 2)
+        BOT['ringfenced'] = 0.0
+    _log('HARVEST', f"Ringfence reset — £{amount:.2f} released back to trading pool")
+    return jsonify({'ok': True, 'released': amount})
 
 
 if __name__ == '__main__':
