@@ -1,4 +1,4 @@
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, request, send_file
 from flask_cors import CORS
 import krakenex
 import os
@@ -325,7 +325,7 @@ def _bot_loop():
 # ─── ROUTES ───────────────────────────────────────────────────────────────────
 @app.route('/')
 def index():
-    return jsonify({'status': 'online', 'app': 'GAINOID by DCE Corp', 'tagline': 'Trade. Slay. Profit.'})
+    return send_file('gainoid.html')
 
 
 @app.route('/health')
