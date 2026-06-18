@@ -9,6 +9,8 @@ from datetime import datetime
 app = Flask(__name__)
 CORS(app)
 
+KRAKEN_TIMEOUT = 15  # seconds; without this a slow/unresponsive Kraken API call blocks the request indefinitely
+
 # ─── BOT STATE ────────────────────────────────────────────────────────────────
 _lock     = threading.Lock()
 _stop_evt = threading.Event()
@@ -106,7 +108,7 @@ def _do_buy(k, pair, sym, qty, price, spend_gbp):
         'type':      'buy',
         'ordertype': 'market',
         'volume':    f"{qty:.8f}",
-    })
+    }, timeout=KRAKEN_TIMEOUT)
     errs = resp.get('error') or []
     if errs:
         _log('ERR', f"BUY {sym} failed: {errs}")
@@ -120,7 +122,7 @@ def _do_buy(k, pair, sym, qty, price, spend_gbp):
 def _reconcile_positions(k):
     """Backfill entry/DCA tracking for coins already held but untracked (e.g. after a process restart wiped in-memory state). Uses Kraken's own trade history as the source of truth instead of relying on persisted local state."""
     try:
-        bal_resp = k.query_private('Balance')
+        bal_resp = k.query_private('Balance', timeout=KRAKEN_TIMEOUT)
         if bal_resp.get('error'):
             return
         balances = {c: float(a) for c, a in bal_resp['result'].items()}
@@ -129,7 +131,7 @@ def _reconcile_positions(k):
         return
 
     try:
-        th_resp = k.query_private('TradesHistory', {'trades': True})
+        th_resp = k.query_private('TradesHistory', {'trades': True}, timeout=KRAKEN_TIMEOUT)
         trades_raw = th_resp.get('result', {}).get('trades', {}) if not th_resp.get('error') else {}
     except Exception:
         trades_raw = {}
@@ -209,7 +211,7 @@ def _do_sell(k, pair, sym, qty, price, reason='MOMENTUM'):
         'type':      'sell',
         'ordertype': 'market',
         'volume':    f"{qty:.8f}",
-    })
+    }, timeout=KRAKEN_TIMEOUT)
     errs = resp.get('error') or []
     if errs:
         _log('ERR', f"SELL {sym} failed: {errs}")
@@ -247,7 +249,7 @@ def _run_cycle():
     held_coins = set(cfg.get('held_coins', []))
 
     try:
-        bal_resp = k.query_private('Balance')
+        bal_resp = k.query_private('Balance', timeout=KRAKEN_TIMEOUT)
         if bal_resp.get('error') and bal_resp['error']:
             _log('ERR', f"Balance: {bal_resp['error']}")
             return
@@ -265,7 +267,7 @@ def _run_cycle():
 
     try:
         pairs_str = ','.join(v['pair'] for v in COINS.values())
-        tick      = k.query_public('Ticker', {'pair': pairs_str})
+        tick      = k.query_public('Ticker', {'pair': pairs_str}, timeout=KRAKEN_TIMEOUT)
         if tick.get('error') and tick['error']:
             _log('ERR', f"Ticker: {tick['error']}")
             return
@@ -447,14 +449,14 @@ def verify_keys():
 
     try:
         k         = get_kraken(api_key, api_secret)
-        time_resp = k.query_public('Time')
+        time_resp = k.query_public('Time', timeout=KRAKEN_TIMEOUT)
         if time_resp.get('error') and time_resp['error']:
             return jsonify({'ok': False, 'error': f"Kraken unreachable: {time_resp['error']}"}), 502
     except Exception as e:
         return jsonify({'ok': False, 'error': f"Cannot reach Kraken: {str(e)}"}), 502
 
     try:
-        bal = k.query_private('Balance')
+        bal = k.query_private('Balance', timeout=KRAKEN_TIMEOUT)
         if bal.get('error') and bal['error']:
             return jsonify({'ok': False, 'error': f"Invalid API keys: {bal['error']}"}), 401
         balances    = {c: float(a) for c, a in bal['result'].items() if float(a) > 0.0001}
@@ -476,14 +478,14 @@ def portfolio():
 
     try:
         k        = get_kraken(api_key, api_secret)
-        bal      = k.query_private('Balance')
+        bal      = k.query_private('Balance', timeout=KRAKEN_TIMEOUT)
         if bal.get('error'):
             return jsonify({'error': str(bal['error'])}), 400
 
         balances = {c: float(a) for c, a in bal['result'].items() if float(a) > 0.0001}
         COIN_MAP = {**COINS, 'ZGBP': {'sym': 'GBP', 'name': 'Sterling', 'pair': None}}
         pairs  = [v['pair'] for v in COIN_MAP.values() if v['pair']]
-        ticker = k.query_public('Ticker', {'pair': ','.join(pairs)})
+        ticker = k.query_public('Ticker', {'pair': ','.join(pairs)}, timeout=KRAKEN_TIMEOUT)
         prices = {}
         opens  = {}
         if not ticker.get('error'):
@@ -531,7 +533,7 @@ def trades():
 
     try:
         k    = get_kraken(api_key, api_secret)
-        resp = k.query_private('TradesHistory', {'trades': True})
+        resp = k.query_private('TradesHistory', {'trades': True}, timeout=KRAKEN_TIMEOUT)
         if resp.get('error'):
             return jsonify({'error': str(resp['error'])}), 400
 
