@@ -117,6 +117,92 @@ def _do_buy(k, pair, sym, qty, price, spend_gbp):
     return True
 
 
+def _reconcile_positions(k):
+    """Backfill entry/DCA tracking for coins already held but untracked (e.g. after a process restart wiped in-memory state). Uses Kraken's own trade history as the source of truth instead of relying on persisted local state."""
+    try:
+        bal_resp = k.query_private('Balance')
+        if bal_resp.get('error'):
+            return
+        balances = {c: float(a) for c, a in bal_resp['result'].items()}
+    except Exception as e:
+        _log('ERR', f"Reconcile balance fetch: {e}")
+        return
+
+    try:
+        th_resp = k.query_private('TradesHistory', {'trades': True})
+        trades_raw = th_resp.get('result', {}).get('trades', {}) if not th_resp.get('error') else {}
+    except Exception:
+        trades_raw = {}
+
+    pair_to_sym = {v['pair']: v['sym'] for v in COINS.values()}
+    buys_by_sym = {}
+    for t in trades_raw.values():
+        sym = pair_to_sym.get(t.get('pair', ''))
+        if not sym or t.get('type') != 'buy':
+            continue
+        buys_by_sym.setdefault(sym, []).append(
+            (float(t.get('time', 0)), float(t.get('price', 0)), float(t.get('vol', 0)))
+        )
+
+    with _lock:
+        for coin_key, info in COINS.items():
+            sym = info['sym']
+            qty = balances.get(coin_key, 0.0)
+            if qty <= 0 or sym in BOT['entry_prices']:
+                continue
+
+            buys = sorted(buys_by_sym.get(sym, []), reverse=True)
+            remaining, cost, covered = qty, 0.0, 0.0
+            for _, price, vol in buys:
+                take = min(vol, remaining)
+                cost += take * price
+                covered += take
+                remaining -= take
+                if remaining <= 0:
+                    break
+            avg_entry = cost / covered if covered > 0 else 0.0
+
+            if avg_entry > 0:
+                BOT['entry_prices'][sym] = avg_entry
+                BOT['dca_state'][sym] = {'tranche': 1, 'avg_entry': avg_entry, 'total_qty': qty}
+                _log('RECONCILE', f"{sym} held=£{qty:.6f} avg_entry=£{avg_entry:.4f} (restored from trade history)")
+
+
+def _rotate_capital(k, sym_needed, shortfall, balances, prices, opens, held_coins, min_order):
+    """Sell the worst-performing eligible holding(s) to free up GBP for a new buy signal, instead of leaving capital idle just because cash is low."""
+    candidates = []
+    for coin_key, info in COINS.items():
+        csym = info['sym']
+        if csym == sym_needed or csym in held_coins:
+            continue
+        pair   = info['pair']
+        price  = prices.get(pair, 0)
+        open_p = opens.get(pair, 0)
+        if not price or not open_p:
+            continue
+        qty = balances.get(coin_key, 0.0)
+        val = qty * price
+        if val < min_order:
+            continue
+        change = ((price - open_p) / open_p) * 100
+        candidates.append((change, coin_key, csym, pair, qty, price, val))
+
+    candidates.sort(key=lambda c: c[0])  # worst performer first
+
+    freed = 0.0
+    for change, coin_key, csym, pair, qty, price, val in candidates:
+        if freed >= shortfall:
+            break
+        _log('ROTATE', f"{csym} change={change:+.2f}% £{val:.2f} — selling to fund {sym_needed}")
+        if _do_sell(k, pair, csym, qty, price, reason='ROTATE'):
+            with _lock:
+                BOT['entry_prices'].pop(csym, None)
+                BOT['dca_state'].pop(csym, None)
+            balances[coin_key] = 0.0
+            freed += val
+    return freed
+
+
 def _do_sell(k, pair, sym, qty, price, reason='MOMENTUM'):
     resp = k.query_private('AddOrder', {
         'pair':      pair,
@@ -241,6 +327,11 @@ def _run_cycle():
                         continue  # already bought this tranche
                     if change <= t['threshold']:
                         spend = gbp * t['alloc']
+                        if spend < cfg['min_order']:
+                            freed = _rotate_capital(k, sym, cfg['min_order'] - max(spend, 0), balances, prices, opens, held_coins, cfg['min_order'])
+                            if freed > 0:
+                                gbp  += freed
+                                spend = gbp * t['alloc']
                         if spend >= cfg['min_order']:
                             qty = spend / price
                             _log('SIGNAL', f"{sym} change={change:+.2f}% — BUY T{tranche_num}/3 (dca)")
@@ -263,6 +354,11 @@ def _run_cycle():
 
             if buy_signal:
                 spend = min(gbp * thresholds['alloc'], gbp - 1.0)
+                if spend < cfg['min_order']:
+                    freed = _rotate_capital(k, sym, cfg['min_order'] - max(spend, 0), balances, prices, opens, held_coins, cfg['min_order'])
+                    if freed > 0:
+                        gbp  += freed
+                        spend = min(gbp * thresholds['alloc'], gbp - 1.0)
                 if spend >= cfg['min_order']:
                     qty = spend / price
                     _log('SIGNAL', f"{sym} change={change:+.2f}% — BUY (dip)")
@@ -283,6 +379,11 @@ def _run_cycle():
 
             if buy_signal:
                 spend = min(gbp * thresholds['alloc'], gbp - 1.0)
+                if spend < cfg['min_order']:
+                    freed = _rotate_capital(k, sym, cfg['min_order'] - max(spend, 0), balances, prices, opens, held_coins, cfg['min_order'])
+                    if freed > 0:
+                        gbp  += freed
+                        spend = min(gbp * thresholds['alloc'], gbp - 1.0)
                 if spend >= cfg['min_order']:
                     qty = spend / price
                     _log('SIGNAL', f"{sym} change={change:+.2f}% — BUY (momentum)")
@@ -471,6 +572,8 @@ def bot_start():
         for field in ('mode', 'interval', 'harvest_pct', 'harvest_enabled', 'min_order', 'stop_loss', 'held_coins'):
             if field in cfg:
                 BOT['config'][field] = cfg[field]
+
+    _reconcile_positions(get_kraken(api_key, api_secret))
 
     _stop_evt.clear()
     _thread = threading.Thread(target=_bot_loop, daemon=True)
