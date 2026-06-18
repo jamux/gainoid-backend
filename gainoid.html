@@ -64,13 +64,20 @@ body::after{content:'';position:fixed;inset:0;background:repeating-linear-gradie
 .hdr-corp{font-family:'Share Tech Mono',monospace;font-size:8px;letter-spacing:3px;color:var(--dim2);line-height:1}
 .hdr-logo{font-family:'Orbitron',monospace;font-weight:900;font-size:26px;background:linear-gradient(90deg,#ff00cc,#8b00ff,#00e5ff);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;line-height:1}
 .hdr-right{display:flex;flex-direction:column;align-items:flex-end;gap:4px}
-.bot-pill{display:flex;align-items:center;gap:5px;background:rgba(0,255,148,0.08);border:1px solid rgba(0,255,148,0.3);border-radius:20px;padding:3px 10px;cursor:pointer;transition:all 0.2s}
-.bot-pill.off{background:rgba(255,34,85,0.08);border-color:rgba(255,34,85,0.3)}
-.bot-dot{width:7px;height:7px;border-radius:50%;background:var(--green);box-shadow:0 0 8px var(--green);animation:blink 1.5s ease infinite}
-.bot-pill.off .bot-dot{background:var(--red);box-shadow:0 0 8px var(--red);animation:none}
-@keyframes blink{0%,100%{opacity:1}50%{opacity:0.2}}
-.bot-txt{font-family:'Share Tech Mono',monospace;font-size:9px;color:var(--green);letter-spacing:1px}
-.bot-pill.off .bot-txt{color:var(--red)}
+.bot-toggle-wrap{display:flex;align-items:center;gap:8px;cursor:pointer;user-select:none;-webkit-user-select:none}
+.bot-toggle-lbl{font-family:'Share Tech Mono',monospace;font-size:9px;color:var(--green);letter-spacing:1px;transition:color 0.3s;min-width:62px;text-align:right}
+.bot-toggle-lbl.off{color:var(--red)}
+.bot-toggle-lbl.pending{color:var(--yellow)}
+.toggle-track{position:relative;width:38px;height:20px;border-radius:10px;background:rgba(0,255,148,0.15);border:1px solid var(--green);box-shadow:0 0 8px rgba(0,255,148,0.3);transition:background 0.3s,border-color 0.3s,box-shadow 0.3s;flex-shrink:0}
+.toggle-track.off{background:rgba(255,34,85,0.15);border-color:var(--red);box-shadow:0 0 8px rgba(255,34,85,0.3)}
+.toggle-track.pending{background:rgba(255,196,0,0.1);border-color:var(--yellow);box-shadow:0 0 8px rgba(255,196,0,0.4);animation:toggleGlow 1s ease infinite}
+@keyframes toggleGlow{0%,100%{box-shadow:0 0 4px rgba(255,196,0,0.3)}50%{box-shadow:0 0 14px rgba(255,196,0,0.8)}}
+.toggle-thumb{position:absolute;top:2px;left:20px;width:14px;height:14px;border-radius:50%;background:var(--green);box-shadow:0 0 8px var(--green);transition:left 0.3s cubic-bezier(0.34,1.56,0.64,1),background 0.3s,box-shadow 0.3s}
+.toggle-track.off .toggle-thumb{left:2px;background:var(--red);box-shadow:0 0 8px var(--red)}
+.toggle-track.pending .toggle-thumb{background:var(--yellow);box-shadow:0 0 8px var(--yellow);animation:pendingSlide 1.4s ease infinite}
+@keyframes pendingSlide{0%,100%{left:2px}50%{left:20px}}
+.bot-sync-txt{font-family:'Share Tech Mono',monospace;font-size:8px;color:var(--yellow);letter-spacing:1px;text-align:right;height:11px;opacity:0;transition:opacity 0.3s}
+.bot-sync-txt.visible{opacity:1}
 .hdr-timer{font-family:'Share Tech Mono',monospace;font-size:10px;color:var(--dim2)}
 .hdr-timer span{color:var(--cyan)}
 
@@ -254,11 +261,14 @@ body::after{content:'';position:fixed;inset:0;background:repeating-linear-gradie
         <div class="hdr-logo">GAINOID</div>
       </div>
       <div class="hdr-right">
-        <div class="bot-pill" id="botPill" onclick="toggleBot()">
-          <div class="bot-dot" id="botDot"></div>
-          <span class="bot-txt" id="botTxt">BOT LIVE</span>
+        <div class="bot-toggle-wrap" onclick="toggleBot()">
+          <span class="bot-toggle-lbl" id="botTxt">BOT LIVE</span>
+          <div class="toggle-track" id="botTrack">
+            <div class="toggle-thumb"></div>
+          </div>
         </div>
-        <div class="hdr-timer">NEXT CYCLE: <span id="timerDisplay">15:00</span></div>
+        <div class="bot-sync-txt" id="botSyncTxt"></div>
+        <div class="hdr-timer">LAST CYCLE: <span id="timerDisplay">--</span></div>
       </div>
     </div>
     <div class="ticker-wrap">
@@ -491,6 +501,8 @@ body::after{content:'';position:fixed;inset:0;background:repeating-linear-gradie
 // ═══════════════════════════════════
 const S = {
   botActive: true,
+  botPending: false,
+  pendingTarget: null,
   countdown: 900,
   apiKey: '',
   apiSecret: '',
@@ -833,98 +845,139 @@ function saveSettings() {
 }
 
 // ═══════════════════════════════════
+// BOT UI HELPER
+// ═══════════════════════════════════
+function updateBotUI(state) {
+  const track = document.getElementById('botTrack');
+  const txt   = document.getElementById('botTxt');
+  const sync  = document.getElementById('botSyncTxt');
+  track.classList.remove('off','pending');
+  txt.classList.remove('off','pending');
+  if (state === 'live') {
+    txt.textContent = 'BOT LIVE';
+  } else if (state === 'offline') {
+    track.classList.add('off');
+    txt.classList.add('off');
+    txt.textContent = 'BOT OFFLINE';
+  } else if (state === 'pending') {
+    track.classList.add('pending');
+    txt.classList.add('pending');
+    txt.textContent = 'SYNCING...';
+    sync.classList.add('visible');
+  }
+}
+
+function setBotSyncMsg(attempts) {
+  const sync = document.getElementById('botSyncTxt');
+  if (attempts < 3)      sync.textContent = '⟳ CONTACTING SERVER...';
+  else if (attempts < 8) sync.textContent = '⟳ WAITING FOR RAILWAY...';
+  else                   sync.textContent = '⟳ RAILWAY STARTING...';
+}
+
+// ═══════════════════════════════════
+// PENDING POLL
+// ═══════════════════════════════════
+let pendingPollTimer = null;
+let pendingAttempts  = 0;
+
+function startPendingPoll() {
+  pendingAttempts = 0;
+  if (pendingPollTimer) clearInterval(pendingPollTimer);
+  pendingPollTimer = setInterval(async () => {
+    pendingAttempts++;
+    setBotSyncMsg(pendingAttempts);
+    try {
+      const r    = await fetch(S.backendUrl + '/bot/status');
+      const data = await r.json();
+      if (data.active === S.pendingTarget) {
+        clearInterval(pendingPollTimer);
+        pendingPollTimer = null;
+        S.botPending = false;
+        S.botActive  = data.active;
+        updateBotUI(data.active ? 'live' : 'offline');
+        document.getElementById('botSyncTxt').classList.remove('visible');
+        showShanice(data.active ? 'resume' : 'pause');
+        syncBotData(data);
+      }
+    } catch(e) { /* keep showing RAILWAY STARTING... */ }
+    if (pendingAttempts > 60) {
+      clearInterval(pendingPollTimer);
+      pendingPollTimer = null;
+      S.botPending = false;
+      updateBotUI(S.botActive ? 'live' : 'offline');
+      document.getElementById('botSyncTxt').classList.remove('visible');
+    }
+  }, 3000);
+}
+
+// ═══════════════════════════════════
 // BOT
 // ═══════════════════════════════════
 async function toggleBot() {
-  const pill = document.getElementById('botPill');
-  const txt  = document.getElementById('botTxt');
+  if (S.botPending) return;
+  if (!S.backendUrl) { showShanice('pause'); return; }
 
-  if (!S.backendUrl) {
-    showShanice('pause');
-    return;
-  }
+  S.botPending    = true;
+  S.pendingTarget = !S.botActive;
+  updateBotUI('pending');
+  setBotSyncMsg(0);
 
-  if (S.botActive) {
-    // Stop the bot
-    try {
+  try {
+    if (S.botActive) {
       await fetch(S.backendUrl + '/bot/stop', { method: 'POST' });
-    } catch(e) {}
-    S.botActive = false;
-    pill.classList.add('off'); txt.textContent='BOT OFF';
-    showShanice('pause');
-  } else {
-    // Start the bot
-    try {
-      const r = await fetch(S.backendUrl + '/bot/start', {
+    } else {
+      await fetch(S.backendUrl + '/bot/start', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           api_key:    S.apiKey,
           api_secret: S.apiSecret,
           config: {
-            mode:             S.config.mode,
-            interval:         S.config.interval,
-            harvest_pct:      S.config.harvest,
-            harvest_enabled:  S.config.harvestEnabled || false,
-            min_order:        S.config.minOrder,
-            stop_loss:        S.config.stopLoss,
+            mode:            S.config.mode,
+            interval:        S.config.interval,
+            harvest_pct:     S.config.harvest,
+            harvest_enabled: S.config.harvestEnabled || false,
+            min_order:       S.config.minOrder,
+            stop_loss:       S.config.stopLoss,
           }
         })
       });
-      const data = await r.json();
-      if (data.status === 'started' || data.status === 'already_running') {
-        S.botActive = true;
-        pill.classList.remove('off'); txt.textContent='BOT LIVE';
-        showShanice('resume');
-      }
-    } catch(e) {
-      console.error('Bot start failed:', e);
     }
-  }
+  } catch(e) {}
+
+  startPendingPoll();
 }
 
 // ═══════════════════════════════════
 // BOT STATUS POLL
 // ═══════════════════════════════════
+function syncBotData(data) {
+  if (data.trades && data.trades.length > 0) {
+    S.trades      = data.trades;
+    S.harvested   = data.harvested   || 0;
+    S.todayProfit = data.today_profit || 0;
+    S.totalFees   = data.total_fees   || 0;
+    renderTrades();
+    updatePortfolio();
+  }
+  const ring = data.ringfenced || 0;
+  const ringEl = document.getElementById('h-ringfenced');
+  if (ringEl) ringEl.textContent = '£' + ring.toFixed(2);
+  if (data.last_cycle) {
+    const diffM = Math.floor((Date.now() - new Date(data.last_cycle + 'Z').getTime()) / 60000);
+    const timerEl = document.getElementById('timerDisplay');
+    if (timerEl) timerEl.textContent = diffM < 1 ? 'just now' : diffM + 'm ago';
+  }
+}
+
 async function pollBotStatus() {
-  if (!S.backendUrl) return;
+  if (!S.backendUrl || S.botPending) return;
   try {
     const r    = await fetch(S.backendUrl + '/bot/status');
     const data = await r.json();
-
-    // Sync bot active state with server
-    const pill = document.getElementById('botPill');
-    const txt  = document.getElementById('botTxt');
     S.botActive = data.active;
-    if (data.active) {
-      pill.classList.remove('off'); txt.textContent='BOT LIVE';
-    } else {
-      pill.classList.add('off'); txt.textContent='BOT OFF';
-    }
-
-    // Update trades from server
-    if (data.trades && data.trades.length > 0) {
-      S.trades      = data.trades;
-      S.harvested   = data.harvested   || 0;
-      S.todayProfit = data.today_profit || 0;
-      S.totalFees   = data.total_fees   || 0;
-      renderTrades();
-      updatePortfolio();
-    }
-
-    // Ringfence display
-    const ring = data.ringfenced || 0;
-    const el = document.getElementById('h-ringfenced');
-    if (el) el.textContent = '£' + ring.toFixed(2);
-
-    // Update last cycle timer display
-    if (data.last_cycle) {
-      const last   = new Date(data.last_cycle + 'Z');
-      const diffMs = Date.now() - last.getTime();
-      const diffM  = Math.floor(diffMs / 60000);
-      const el     = document.getElementById('timerDisplay');
-      if (el) el.textContent = diffM < 1 ? 'just now' : diffM + 'm ago';
-    }
+    updateBotUI(data.active ? 'live' : 'offline');
+    syncBotData(data);
   } catch(e) {}
 }
 

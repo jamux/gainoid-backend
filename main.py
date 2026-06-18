@@ -12,12 +12,14 @@ CORS(app)
 KRAKEN_TIMEOUT = 15  # seconds; without this a slow/unresponsive Kraken API call blocks the request indefinitely
 
 # ─── BOT STATE ────────────────────────────────────────────────────────────────
-_lock     = threading.Lock()
-_stop_evt = threading.Event()
-_thread   = None
+# "Is the bot running" is derived from `_thread.is_alive()`, not a separately
+# mutated boolean — that avoids the two states ever drifting out of sync
+# (e.g. a crashed thread silently leaving a stale "active: true" behind).
+_lock        = threading.Lock()
+_thread      = None
+_run_stop_evt = None  # the threading.Event belonging to the *current* run, set by bot_stop()
 
 BOT = {
-    'active':       False,
     'api_key':      '',
     'api_secret':   '',
     'config': {
@@ -76,6 +78,10 @@ def get_kraken(api_key=None, api_secret=None):
     return k
 
 
+def _is_running():
+    return _thread is not None and _thread.is_alive()
+
+
 def _log(level, msg):
     entry = f"[{datetime.utcnow().strftime('%H:%M:%S')}] {level}: {msg}"
     print(entry, flush=True)
@@ -102,7 +108,7 @@ def _record_trade(txid, side, sym, amount_gbp, price, fee, reason=''):
             BOT['trades'] = BOT['trades'][:100]
 
 
-def _do_buy(k, pair, sym, qty, price, spend_gbp):
+def _do_buy(k, pair, sym, qty, price, spend_gbp, reason='BUY'):
     resp = k.query_private('AddOrder', {
         'pair':      pair,
         'type':      'buy',
@@ -114,8 +120,8 @@ def _do_buy(k, pair, sym, qty, price, spend_gbp):
         _log('ERR', f"BUY {sym} failed: {errs}")
         return False
     txid = (resp.get('result', {}).get('txid') or ['?'])[0]
-    _record_trade(txid, 'buy', sym, spend_gbp, price, spend_gbp * 0.0026, reason='MOMENTUM')
-    _log('BUY', f"{sym} {qty:.6f} @ £{price:.4f}  spend=£{spend_gbp:.2f}")
+    _record_trade(txid, 'buy', sym, spend_gbp, price, spend_gbp * 0.0026, reason=reason)
+    _log('BUY', f"{sym} {qty:.6f} @ £{price:.4f}  spend=£{spend_gbp:.2f}  reason={reason}")
     return True
 
 
@@ -337,7 +343,7 @@ def _run_cycle():
                         if spend >= cfg['min_order']:
                             qty = spend / price
                             _log('SIGNAL', f"{sym} change={change:+.2f}% — BUY T{tranche_num}/3 (dca)")
-                            if _do_buy(k, pair, sym, qty, price, spend):
+                            if _do_buy(k, pair, sym, qty, price, spend, reason='DCA'):
                                 old_qty   = dca['total_qty']
                                 old_entry = dca['avg_entry']
                                 new_qty   = old_qty + qty
@@ -364,7 +370,7 @@ def _run_cycle():
                 if spend >= cfg['min_order']:
                     qty = spend / price
                     _log('SIGNAL', f"{sym} change={change:+.2f}% — BUY (dip)")
-                    if _do_buy(k, pair, sym, qty, price, spend):
+                    if _do_buy(k, pair, sym, qty, price, spend, reason='DIP'):
                         with _lock:
                             BOT['entry_prices'][sym] = price
                         gbp -= spend
@@ -389,7 +395,7 @@ def _run_cycle():
                 if spend >= cfg['min_order']:
                     qty = spend / price
                     _log('SIGNAL', f"{sym} change={change:+.2f}% — BUY (momentum)")
-                    if _do_buy(k, pair, sym, qty, price, spend):
+                    if _do_buy(k, pair, sym, qty, price, spend, reason='MOMENTUM'):
                         with _lock:
                             BOT['entry_prices'][sym] = price
                         gbp -= spend
@@ -404,9 +410,17 @@ def _run_cycle():
     _log('CYCLE', 'Complete')
 
 
-def _bot_loop():
-    _log('BOT', 'Thread started')
-    while not _stop_evt.is_set():
+def _bot_loop(stop_evt, api_key, api_secret):
+    """Runs entirely off the request/response cycle: reconcile, then trade on
+    a timer, until `stop_evt` is set. Never called from inside a Flask route
+    handler — that's what let a slow Kraken response wedge every endpoint."""
+    _log('BOT', 'Thread started — reconciling existing positions')
+    try:
+        _reconcile_positions(get_kraken(api_key, api_secret))
+    except Exception as e:
+        _log('ERR', f"Reconcile failed (continuing anyway): {e}")
+
+    while not stop_evt.is_set():
         try:
             _run_cycle()
         except Exception as e:
@@ -416,12 +430,10 @@ def _bot_loop():
             interval_secs = BOT['config']['interval'] * 60
 
         elapsed = 0
-        while elapsed < interval_secs and not _stop_evt.is_set():
+        while elapsed < interval_secs and not stop_evt.is_set():
             time.sleep(10)
             elapsed += 10
 
-    with _lock:
-        BOT['active'] = False
     _log('BOT', 'Thread stopped')
 
 
@@ -433,9 +445,7 @@ def index():
 
 @app.route('/health')
 def health():
-    with _lock:
-        active = BOT['active']
-    return jsonify({'status': 'ok', 'bot': 'LIVE' if active else 'STANDBY'})
+    return jsonify({'status': 'ok', 'bot': 'LIVE' if _is_running() else 'STANDBY'})
 
 
 @app.route('/verify-keys', methods=['POST'])
@@ -555,7 +565,12 @@ def trades():
 
 @app.route('/bot/start', methods=['POST'])
 def bot_start():
-    global _thread, _stop_evt
+    """Only ever does fast, in-memory work and returns immediately. All
+    Kraken calls (reconcile + the trading cycles) happen inside the
+    background thread, never here — this endpoint must never be able to
+    hang, since every other endpoint's responsiveness depends on it not
+    wedging the request-handling pool."""
+    global _thread, _run_stop_evt
 
     data       = request.json or {}
     api_key    = data.get('api_key', '').strip()    or os.environ.get('KRAKEN_API_KEY', '')
@@ -565,30 +580,31 @@ def bot_start():
         return jsonify({'error': 'API keys required'}), 401
 
     with _lock:
-        if BOT['active']:
+        if _is_running():
             return jsonify({'status': 'already_running', 'config': BOT['config']})
+
         BOT['api_key']    = api_key
         BOT['api_secret'] = api_secret
-        BOT['active']     = True
         cfg = data.get('config', {})
         for field in ('mode', 'interval', 'harvest_pct', 'harvest_enabled', 'min_order', 'stop_loss', 'held_coins'):
             if field in cfg:
                 BOT['config'][field] = cfg[field]
 
-    _reconcile_positions(get_kraken(api_key, api_secret))
+        # A fresh Event per run — so a still-shutting-down previous thread
+        # (checking its own, now-replaced Event) can never be reactivated
+        # by a new start() clearing a shared one and end up running twice.
+        _run_stop_evt = threading.Event()
+        _thread = threading.Thread(target=_bot_loop, args=(_run_stop_evt, api_key, api_secret), daemon=True)
+        _thread.start()
 
-    _stop_evt.clear()
-    _thread = threading.Thread(target=_bot_loop, daemon=True)
-    _thread.start()
     _log('BOT', f"Started — mode={BOT['config']['mode']} interval={BOT['config']['interval']}m")
     return jsonify({'status': 'started', 'config': BOT['config']})
 
 
 @app.route('/bot/stop', methods=['POST'])
 def bot_stop():
-    _stop_evt.set()
-    with _lock:
-        BOT['active'] = False
+    if _run_stop_evt is not None:
+        _run_stop_evt.set()
     _log('BOT', 'Stop requested')
     return jsonify({'status': 'stopping'})
 
@@ -597,7 +613,7 @@ def bot_stop():
 def bot_status():
     with _lock:
         return jsonify({
-            'active':       BOT['active'],
+            'active':       _is_running(),
             'config':       BOT['config'],
             'last_cycle':   BOT['last_cycle'],
             'trades':       BOT['trades'][:20],
